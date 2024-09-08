@@ -1,31 +1,34 @@
+import os
 import streamlit as st
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-import os
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain.vectorstores import FAISS, Pinecone
+import google.generativeai as genai
+from langchain.vectorstores import Pinecone
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 import pinecone
-import google.generativeai as genai
-import pinecone
-import os
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Google Generative AI
-api_key = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=api_key)
+# Configure Google Generative AI API
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# Initialize embeddings globally
+# Initialize Google Embeddings
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
+# Pinecone API key and environment from .env file
+api_key = os.getenv("PINECONE_API_KEY")
+index_name = "tarunaim"
+environment = "us-west1-gcp"
 
+# Initialize Pinecone client
+pinecone.init(api_key=api_key, environment=environment)
 
-
-index_name = "aim"
+# Access the existing Pinecone index
+index = pinecone.Index(index_name)
 
 def get_pdf_text(pdf_docs):
     text = ""
@@ -51,40 +54,27 @@ def get_conversational_chain():
     """
 
     model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3)
-
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
     return chain
 
-def get_pinecone_index():
-    # Connect to the Pinecone index
-    index = pinecone.Index(index_name)
-    
-    # Check if the index exists and create if necessary
-    if index_name not in pinecone.list_indexes():
-        pinecone.create_index(
-            name=index_name,
-            dimension=768,  # Replace with your embedding dimension
-            metric="cosine"
-        )
-    
-    return index
+def get_vector_store(text_chunks):
+    # Use LangChain's Pinecone wrapper to store documents and embeddings
+    vector_store = Pinecone.from_texts(text_chunks, embeddings, index_name=index_name)
+    return vector_store
 
 def user_input(user_question, k=2):
-    index = get_pinecone_index()
-
-    # Perform similarity search
-    matching_results = index.query(user_question, top_k=k)
+    # Perform similarity search using LangChain's Pinecone wrapper
+    vector_store = Pinecone(index, embeddings.embed_query)  # Embedding query handler
+    matching_results = vector_store.similarity_search(user_question, k=k)
     
     chain = get_conversational_chain()
-
     response = chain(
         {"input_documents": matching_results, "question": user_question},
         return_only_outputs=True
     )
 
-    print(response)
     st.write("Reply: ", response["output_text"])
 
 def main():
@@ -104,9 +94,8 @@ def main():
                 raw_text = get_pdf_text(pdf_docs)
                 text_chunks = get_text_chunks(raw_text)
                 
-                
-                index = get_pinecone_index()
-                Pinecone.from_documents(text_chunks, embeddings, index_name=index_name)
+                # Store documents in Pinecone via LangChain wrapper
+                get_vector_store(text_chunks)
                 
                 st.success("Processing complete")
 
